@@ -106,7 +106,7 @@ import importlib
 import importlib.util
 import errno
 import contextlib
-from sysconfig import get_path
+import sysconfig
 import math
 import traceback
 from concurrent.futures.process import _MAX_WINDOWS_WORKERS
@@ -309,11 +309,6 @@ class Dirs:
         else:
             self.installed = self.build.parent / (self.build.stem + "-install")
 
-        if sys.platform == 'win32' and sys.version_info < (3, 10):
-            # Work around a pathlib bug; these must be absolute paths
-            self.build = Path(os.path.abspath(self.build))
-            self.installed = Path(os.path.abspath(self.installed))
-
         # relative path for site-package with py version
         # i.e. 'lib/python3.10/site-packages'
         self.site = self.get_site_packages()
@@ -331,22 +326,14 @@ class Dirs:
         return dist_packages path or site_packages path.
         """
         if sys.version_info >= (3, 12):
-            plat_path = Path(get_path('platlib'))
+            plat_path = Path(sysconfig.get_path('platlib'))
         else:
-            # distutils is required to infer meson install path
-            # for python < 3.12 in debian patched python
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning)
-                from distutils import dist
-                from distutils.command.install import INSTALL_SCHEMES
-            if 'deb_system' in INSTALL_SCHEMES:
-                # debian patched python in use
-                install_cmd = dist.Distribution().get_command_obj('install')
-                install_cmd.select_scheme('deb_system')
-                install_cmd.finalize_options()
-                plat_path = Path(install_cmd.install_platlib)
+            # infer meson install path for python < 3.12 in
+            # debian patched python
+            if 'deb_system' in sysconfig.get_scheme_names():
+                plat_path = Path(sysconfig.get_path('platlib', 'deb_system'))
             else:
-                plat_path = Path(get_path('platlib'))
+                plat_path = Path(sysconfig.get_path('platlib'))
         return self.installed / plat_path.relative_to(sys.exec_prefix)
 
 
@@ -416,6 +403,8 @@ class Build(Task):
               "build and build-install directories)."))
     debug = Option(
         ['--debug', '-d'], default=False, is_flag=True, help="Debug build")
+    release = Option(
+        ['--release', '-r'], default=False, is_flag=True, help="Release build")
     parallel = Option(
         ['--parallel', '-j'], default=None, metavar='N_JOBS',
         help=("Number of parallel jobs for building. "
@@ -435,6 +424,10 @@ class Build(Task):
         ['--with-accelerate'], default=False, is_flag=True,
         help=("If set, use `Accelerate` as the BLAS/LAPACK to build against."
               " Takes precedence over -with-scipy-openblas (macOS only)")
+    )
+    tags = Option(
+        ['--tags'], default="runtime,python-runtime,tests,devel",
+        show_default=True, help="Install tags to be used by meson."
     )
 
     @classmethod
@@ -482,6 +475,25 @@ class Build(Task):
                 return
         if args.werror:
             cmd += ["--werror"]
+        if args.debug or args.release:
+            if args.debug and args.release:
+                raise ValueError("Set at most one of `--debug` and `--release`!")
+            if args.debug:
+                buildtype = 'debug'
+                cflags_unwanted = ('-O1', '-O2', '-O3')
+            elif args.release:
+                buildtype = 'release'
+                cflags_unwanted = ('-O0', '-O1', '-O2')
+            cmd += [f"-Dbuildtype={buildtype}"]
+            if 'CFLAGS' in os.environ.keys():
+                # Check that CFLAGS doesn't contain something that supercedes -O0
+                # for a plain debug build (conda envs tend to set -O2)
+                cflags = os.environ['CFLAGS'].split()
+                for flag in cflags_unwanted:
+                    if flag in cflags:
+                        raise ValueError(f"A {buildtype} build isn't possible, "
+                                         f"because CFLAGS contains `{flag}`."
+                                          "Please also check CXXFLAGS and FFLAGS.")
         if args.gcov:
             cmd += ['-Db_coverage=true']
         if args.asan:
@@ -494,7 +506,7 @@ class Build(Task):
         elif args.with_scipy_openblas:
             cls.configure_scipy_openblas()
             env['PKG_CONFIG_PATH'] = os.pathsep.join([
-                    os.path.join(os.getcwd(), '.openblas'),
+                    os.getcwd(),
                     env.get('PKG_CONFIG_PATH', '')
                     ])
 
@@ -544,7 +556,8 @@ class Build(Task):
             if non_empty and not dirs.site.exists():
                 raise RuntimeError("Can't install in non-empty directory: "
                                    f"'{dirs.installed}'")
-        cmd = ["meson", "install", "-C", args.build_dir, "--only-changed"]
+        cmd = ["meson", "install", "-C", args.build_dir,
+               "--only-changed", "--tags", args.tags]
         log_filename = dirs.root / 'meson-install.log'
         start_time = datetime.datetime.now()
         cmd_str = ' '.join([str(p) for p in cmd])
@@ -602,13 +615,12 @@ class Build(Task):
 
     @classmethod
     def configure_scipy_openblas(self, blas_variant='32'):
-        """Create .openblas/scipy-openblas.pc and scipy/_distributor_init_local.py
+        """Create scipy-openblas.pc and scipy/_distributor_init_local.py
 
         Requires a pre-installed scipy-openblas32 wheel from PyPI.
         """
         basedir = os.getcwd()
-        openblas_dir = os.path.join(basedir, ".openblas")
-        pkg_config_fname = os.path.join(openblas_dir, "scipy-openblas.pc")
+        pkg_config_fname = os.path.join(basedir, "scipy-openblas.pc")
 
         if os.path.exists(pkg_config_fname):
             return None
@@ -626,9 +638,8 @@ class Build(Task):
         with open(local, "w", encoding="utf8") as fid:
             fid.write(f"import {module_name}\n")
 
-        os.makedirs(openblas_dir, exist_ok=True)
         with open(pkg_config_fname, "w", encoding="utf8") as fid:
-            fid.write(openblas.get_pkg_config().replace("\\", "/"))
+            fid.write(openblas.get_pkg_config())
 
     @classmethod
     def run(cls, add_path=False, **kwargs):
@@ -662,7 +673,7 @@ class Test(Task):
     $ python dev.py test -t scipy.optimize.tests.test_minimize_constrained
     $ python dev.py test -s cluster -m full --durations 20
     $ python dev.py test -s stats -- --tb=line  # `--` passes next args to pytest
-    $ python dev.py test -b numpy -b pytorch -s cluster
+    $ python dev.py test -b numpy -b torch -s cluster
     ```
     """
     ctx = CONTEXT
@@ -698,7 +709,8 @@ class Test(Task):
         ['--array-api-backend', '-b'], default=None, metavar='ARRAY_BACKEND',
         multiple=True,
         help=(
-            "Array API backend ('all', 'numpy', 'pytorch', 'cupy', 'array_api_strict')."
+            "Array API backend "
+            "('all', 'numpy', 'torch', 'cupy', 'array_api_strict', 'jax.numpy')."
         )
     )
     # Argument can't have `help=`; used to consume all of `-- arg1 arg2 arg3`
@@ -807,6 +819,10 @@ class SmokeDocs(Task):
         dirs.add_sys_path()
         print(f"SciPy from development installed path at: {dirs.site}")
 
+        # prevent obscure error later; cf https://github.com/numpy/numpy/pull/26691/
+        if not importlib.util.find_spec("scipy_doctest"):
+            raise ModuleNotFoundError("Please install scipy-doctest")
+
         # FIXME: support pos-args with doit
         extra_argv = list(pytest_args[:]) if pytest_args else []
         if extra_argv and extra_argv[0] == '--':
@@ -823,7 +839,9 @@ class SmokeDocs(Task):
         else:
             tests = None
 
-        # use strategy=api unless -t path/to/specific/file
+        # Request doctesting; use strategy=api unless -t path/to/specific/file
+        # also switch off assertion rewriting: not useful for doctests
+        extra_argv += ["--doctest-modules", "--assert=plain"]
         if not args.tests:
             extra_argv += ['--doctest-collect=api']
 

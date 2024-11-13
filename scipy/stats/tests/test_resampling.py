@@ -5,8 +5,8 @@ from numpy.testing import assert_allclose, assert_equal, suppress_warnings
 
 from scipy.conftest import array_api_compatible
 from scipy._lib._util import rng_integers
-from scipy._lib._array_api import (is_numpy, xp_assert_close,
-                                   xp_assert_equal, array_namespace)
+from scipy._lib._array_api import array_namespace, is_numpy
+from scipy._lib._array_api_no_0d import xp_assert_close, xp_assert_equal
 from scipy import stats, special
 from scipy.optimize import root
 
@@ -72,9 +72,9 @@ def test_bootstrap_iv():
     with pytest.raises(ValueError, match=message):
         bootstrap(([1, 2, 3],), np.mean, n_resamples=0)
 
-    message = "'herring' cannot be used to seed a"
-    with pytest.raises(ValueError, match=message):
-        bootstrap(([1, 2, 3],), np.mean, random_state='herring')
+    message = "SeedSequence expects int or sequence of ints"
+    with pytest.raises(TypeError, match=message):
+        bootstrap(([1, 2, 3],), np.mean, rng='herring')
 
 
 @pytest.mark.parametrize("method", ['basic', 'percentile', 'BCa'])
@@ -84,10 +84,12 @@ def test_bootstrap_batch(method, axis):
     np.random.seed(0)
 
     x = np.random.rand(10, 11, 12)
+    # SPEC-007 leave one call with random_state to ensure it still works
     res1 = bootstrap((x,), np.mean, batch=None, method=method,
                      random_state=0, axis=axis, n_resamples=100)
+    np.random.seed(0)
     res2 = bootstrap((x,), np.mean, batch=10, method=method,
-                     random_state=0, axis=axis, n_resamples=100)
+                     axis=axis, n_resamples=100)
 
     assert_equal(res2.confidence_interval.low, res1.confidence_interval.low)
     assert_equal(res2.confidence_interval.high, res1.confidence_interval.high)
@@ -113,8 +115,8 @@ def test_bootstrap_paired(method):
 
     i = np.arange(len(x))
 
-    res1 = bootstrap((i,), my_paired_statistic, random_state=0)
-    res2 = bootstrap((x, y), my_statistic, paired=True, random_state=0)
+    res1 = bootstrap((i,), my_paired_statistic, rng=0)
+    res2 = bootstrap((x, y), my_statistic, paired=True, rng=0)
 
     assert_allclose(res1.confidence_interval, res2.confidence_interval)
     assert_allclose(res1.standard_error, res2.standard_error)
@@ -140,7 +142,7 @@ def test_bootstrap_vectorized(method, axis, paired):
     y = np.random.rand(n_samples)
     z = np.random.rand(n_samples)
     res1 = bootstrap((x, y, z), my_statistic, paired=paired, method=method,
-                     random_state=0, axis=0, n_resamples=100)
+                     rng=0, axis=0, n_resamples=100)
     assert (res1.bootstrap_distribution.shape
             == res1.standard_error.shape + (100,))
 
@@ -150,7 +152,7 @@ def test_bootstrap_vectorized(method, axis, paired):
     y = np.broadcast_to(y.reshape(reshape), shape)
     z = np.broadcast_to(z.reshape(reshape), shape)
     res2 = bootstrap((x, y, z), my_statistic, paired=paired, method=method,
-                     random_state=0, axis=axis, n_resamples=100)
+                     rng=0, axis=axis, n_resamples=100)
 
     assert_allclose(res2.confidence_interval.low,
                     res1.confidence_interval.low)
@@ -179,7 +181,7 @@ def test_bootstrap_against_theory(method):
     expected_se = dist.std()
 
     config = dict(data=(data,), statistic=np.mean, n_resamples=5000,
-                  method=method, random_state=rng)
+                  method=method, rng=rng)
     res = bootstrap(**config, confidence_level=alpha)
     assert_allclose(res.confidence_interval, expected_interval, rtol=5e-4)
     assert_allclose(res.standard_error, expected_se, atol=3e-4)
@@ -218,7 +220,7 @@ def test_bootstrap_against_R(method, expected):
     x = np.array([10, 12, 12.5, 12.5, 13.9, 15, 21, 22,
                   23, 34, 50, 81, 89, 121, 134, 213])
     res = bootstrap((x,), np.mean, n_resamples=1000000, method=method,
-                    random_state=0)
+                    rng=0)
     assert_allclose(res.confidence_interval, expected, rtol=0.005)
 
 
@@ -249,11 +251,11 @@ def test_multisample_BCa_against_R():
     rng = np.random.default_rng(468865032284792692)
 
     res_basic = stats.bootstrap((x, y), statistic, method='basic',
-                                batch=100, random_state=rng)
+                                batch=100, rng=rng)
     res_percent = stats.bootstrap((x, y), statistic, method='percentile',
-                                  batch=100, random_state=rng)
+                                  batch=100, rng=rng)
     res_bca = stats.bootstrap((x, y), statistic, method='bca',
-                              batch=100, random_state=rng)
+                              batch=100, rng=rng)
 
     # compute midpoints so we can compare just one number for each
     mid_basic = np.mean(res_basic.confidence_interval)
@@ -288,7 +290,7 @@ def test_multisample_BCa_against_R():
 def test_BCa_acceleration_against_reference():
     # Compare the (deterministic) acceleration parameter for a multi-sample
     # problem against a reference value. The example is from [1], but Efron's
-    # value seems inaccurate. Straightorward code for computing the
+    # value seems inaccurate. Straightforward code for computing the
     # reference acceleration (0.011008228344026734) is available at:
     # https://github.com/scipy/scipy/pull/16455#issuecomment-1193400981
 
@@ -421,9 +423,9 @@ def test_bootstrap_vectorized_3samp(method, axis):
     y = np.random.rand(4, 5)
     z = np.random.rand(4, 5)
     res1 = bootstrap((x, y, z), statistic, vectorized=True,
-                     axis=axis, n_resamples=100, method=method, random_state=0)
+                     axis=axis, n_resamples=100, method=method, rng=0)
     res2 = bootstrap((x, y, z), statistic_1d, vectorized=False,
-                     axis=axis, n_resamples=100, method=method, random_state=0)
+                     axis=axis, n_resamples=100, method=method, rng=0)
     assert_allclose(res1.confidence_interval, res2.confidence_interval)
     assert_allclose(res1.standard_error, res2.standard_error)
 
@@ -445,10 +447,10 @@ def test_bootstrap_vectorized_1samp(method, axis):
     x = np.random.rand(4, 5)
     res1 = bootstrap((x,), statistic, vectorized=True, axis=axis,
                      n_resamples=100, batch=None, method=method,
-                     random_state=0)
+                     rng=0)
     res2 = bootstrap((x,), statistic_1d, vectorized=False, axis=axis,
                      n_resamples=100, batch=10, method=method,
-                     random_state=0)
+                     rng=0)
     assert_allclose(res1.confidence_interval, res2.confidence_interval)
     assert_allclose(res1.standard_error, res2.standard_error)
 
@@ -477,10 +479,10 @@ def test_bootstrap_gh15678(method):
     data = dist.rvs(size=100, random_state=rng)
     data = (data,)
     res = bootstrap(data, stats.skew, method=method, n_resamples=100,
-                    random_state=np.random.default_rng(9563))
+                    rng=np.random.default_rng(9563))
     # this always worked because np.apply_along_axis returns NumPy data type
     ref = bootstrap(data, stats.skew, method=method, n_resamples=100,
-                    random_state=np.random.default_rng(9563), vectorized=False)
+                    rng=np.random.default_rng(9563), vectorized=False)
     assert_allclose(res.confidence_interval, ref.confidence_interval)
     assert_allclose(res.standard_error, ref.standard_error)
     assert isinstance(res.standard_error, np.float64)
@@ -495,10 +497,10 @@ def test_bootstrap_min():
     true_min = np.min(data)
     data = (data,)
     res = bootstrap(data, np.min, method="BCa", n_resamples=100,
-                    random_state=np.random.default_rng(3942))
+                    rng=np.random.default_rng(3942))
     assert true_min == res.confidence_interval.low
     res2 = bootstrap(-np.array(data), np.max, method="BCa", n_resamples=100,
-                     random_state=np.random.default_rng(3942))
+                     rng=np.random.default_rng(3942))
     assert_allclose(-res.confidence_interval.low,
                     res2.confidence_interval.high)
     assert_allclose(-res.confidence_interval.high,
@@ -516,14 +518,14 @@ def test_re_bootstrap(additional_resamples):
     n3 = n1 + additional_resamples
 
     rng = np.random.default_rng(296689032789913033)
-    res = stats.bootstrap((x,), np.mean, n_resamples=n1, random_state=rng,
+    res = stats.bootstrap((x,), np.mean, n_resamples=n1, rng=rng,
                           confidence_level=0.95, method='percentile')
-    res = stats.bootstrap((x,), np.mean, n_resamples=n2, random_state=rng,
+    res = stats.bootstrap((x,), np.mean, n_resamples=n2, rng=rng,
                           confidence_level=0.90, method='BCa',
                           bootstrap_result=res)
 
     rng = np.random.default_rng(296689032789913033)
-    ref = stats.bootstrap((x,), np.mean, n_resamples=n3, random_state=rng,
+    ref = stats.bootstrap((x,), np.mean, n_resamples=n3, rng=rng,
                           confidence_level=0.90, method='BCa')
 
     assert_allclose(res.standard_error, ref.standard_error, rtol=1e-14)
@@ -538,7 +540,7 @@ def test_bootstrap_alternative(method):
     dist = stats.norm(loc=2, scale=4)
     data = (dist.rvs(size=(100), random_state=rng),)
 
-    config = dict(data=data, statistic=np.std, random_state=rng, axis=-1)
+    config = dict(data=data, statistic=np.std, rng=rng, axis=-1)
     t = stats.bootstrap(**config, confidence_level=0.9)
 
     config.update(dict(n_resamples=0, bootstrap_result=t))
@@ -588,7 +590,7 @@ def test_bootstrap_resample(rng_name):
 
     np.random.seed(0)
     x = np.random.rand(*shape)
-    y = _resampling._bootstrap_resample(x, n_resamples, random_state=rng1)
+    y = _resampling._bootstrap_resample(x, n_resamples, rng=rng1)
 
     for i in range(n_resamples):
         # each resample is indexed along second to last axis
@@ -724,12 +726,33 @@ def test_vector_valued_statistic_gh17715():
             [0, 8, 1, 0]]
     data = np.array(data).T
 
-    res = bootstrap(data, statistic_extradim, random_state=rng, paired=True)
-    ref = bootstrap(data, statistic, random_state=rng, paired=True)
+    res = bootstrap(data, statistic_extradim, rng=rng, paired=True)
+    ref = bootstrap(data, statistic, rng=rng, paired=True)
     assert_allclose(res.confidence_interval.low[0],
                     ref.confidence_interval.low, atol=1e-15)
     assert_allclose(res.confidence_interval.high[0],
                     ref.confidence_interval.high, atol=1e-15)
+
+
+def test_gh_20850():
+    rng = np.random.default_rng(2085020850)
+    x = rng.random((10, 2))
+    y = rng.random((11, 2))
+    def statistic(x, y, axis):
+        return stats.ttest_ind(x, y, axis=axis).statistic
+
+    # The shapes do *not* need to be the same along axis
+    stats.bootstrap((x, y), statistic)
+    stats.bootstrap((x.T, y.T), statistic, axis=1)
+    # But even when the shapes *are* the same along axis, the lengths
+    # along other dimensions have to be the same (or `bootstrap` warns).
+    message = "Ignoring the dimension specified by `axis`..."
+    with pytest.warns(FutureWarning, match=message):
+        stats.bootstrap((x, y[:10, 0]), statistic)  # this won't work after 1.16
+    with pytest.warns(FutureWarning, match=message):
+        stats.bootstrap((x, y[:10, 0:1]), statistic)  # this will
+    with pytest.warns(FutureWarning, match=message):
+        stats.bootstrap((x.T, y.T[0:1, :10]), statistic, axis=1)  # this will
 
 
 # --- Test Monte Carlo Hypothesis Test --- #
@@ -1097,6 +1120,7 @@ class TestMonteCarloHypothesisTest:
         assert_allclose(res.statistic, ref.statistic)
         assert_allclose(res.pvalue, ref.pvalue, atol=1e-2)
 
+    @pytest.mark.fail_slow(2)
     @pytest.mark.xfail_on_32bit("Statistic may not depend on sample order on 32-bit")
     def test_finite_precision_statistic(self):
         # Some statistics return numerically distinct values when the values
@@ -1342,12 +1366,12 @@ class TestPermutationTest:
         with pytest.raises(ValueError, match=message):
             permutation_test(([1, 2, 3], [1, 2, 3]), stat, alternative='ekki')
 
-        message = "'herring' cannot be used to seed a"
-        with pytest.raises(ValueError, match=message):
-            permutation_test(([1, 2, 3], [1, 2, 3]), stat,
-                             random_state='herring')
+        message = "SeedSequence expects int or sequence of ints"
+        with pytest.raises(TypeError, match=message):
+            permutation_test(([1, 2, 3], [1, 2, 3]), stat, rng='herring')
 
     # -- Test Parameters -- #
+    # SPEC-007 leave one call with seed to check it still works
     @pytest.mark.parametrize('random_state', [np.random.RandomState,
                                               np.random.default_rng])
     @pytest.mark.parametrize('permutation_type',
@@ -1388,6 +1412,7 @@ class TestPermutationTest:
         assert_equal(res1.pvalue, res3.pvalue)
         assert_equal(res2.pvalue, res3.pvalue)
 
+    # SPEC-007 leave at least one call with seed to check it still works
     @pytest.mark.parametrize('random_state', [np.random.RandomState,
                                               np.random.default_rng])
     @pytest.mark.parametrize('permutation_type, exact_size',
@@ -1437,7 +1462,7 @@ class TestPermutationTest:
             return np.mean(x, axis=axis) - np.mean(y, axis=axis)
 
         kwds = {'vectorized': True, 'permutation_type': 'independent',
-                'batch': 100, 'alternative': alternative, 'random_state': rng}
+                'batch': 100, 'alternative': alternative, 'rng': rng}
         res = permutation_test(data, statistic, n_resamples=permutations,
                                **kwds)
         res2 = permutation_test(data, statistic, n_resamples=np.inf, **kwds)
@@ -1463,7 +1488,7 @@ class TestPermutationTest:
             return np.mean(x - y, axis=axis)
 
         kwds = {'vectorized': True, 'permutation_type': 'samples',
-                'batch': 100, 'alternative': alternative, 'random_state': rng}
+                'batch': 100, 'alternative': alternative, 'rng': rng}
         res = permutation_test(data, statistic, n_resamples=permutations,
                                **kwds)
         res2 = permutation_test(data, statistic, n_resamples=np.inf, **kwds)
@@ -1490,7 +1515,7 @@ class TestPermutationTest:
         statistic = _resampling._vectorize_statistic(statistic1d)
 
         kwds = {'vectorized': True, 'permutation_type': 'samples',
-                'batch': 100, 'alternative': alternative, 'random_state': rng}
+                'batch': 100, 'alternative': alternative, 'rng': rng}
         res = permutation_test(data, statistic, n_resamples=permutations,
                                **kwds)
         res2 = permutation_test(data, statistic, n_resamples=np.inf, **kwds)
@@ -1522,7 +1547,7 @@ class TestPermutationTest:
         res2 = permutation_test((x, y), statistic, vectorized=True,
                                 n_resamples=permutations,
                                 alternative=alternative, axis=axis,
-                                random_state=rng2)
+                                rng=rng2)
 
         assert_allclose(res1.statistic, res2.statistic, rtol=self.rtol)
         assert_allclose(res1.pvalue, res2.pvalue, rtol=self.rtol)
@@ -1544,7 +1569,7 @@ class TestPermutationTest:
         # ks_2samp is always a one-tailed 'greater' test
         # it's the statistic that changes (D+ vs D- vs max(D+, D-))
         res = permutation_test((x, y), statistic1d, n_resamples=np.inf,
-                               alternative='greater', random_state=self.rng)
+                               alternative='greater', rng=self.rng)
 
         assert_allclose(res.statistic, expected.statistic, rtol=self.rtol)
         assert_allclose(res.pvalue, expected.pvalue, rtol=self.rtol)
@@ -1566,7 +1591,7 @@ class TestPermutationTest:
             return stats.ansari(x, y).statistic
 
         res = permutation_test((x, y), statistic1d, n_resamples=np.inf,
-                               alternative=alternative, random_state=self.rng)
+                               alternative=alternative, rng=self.rng)
 
         assert_allclose(res.statistic, expected.statistic, rtol=self.rtol)
         assert_allclose(res.pvalue, expected.pvalue, rtol=self.rtol)
@@ -1584,7 +1609,7 @@ class TestPermutationTest:
 
         res = permutation_test((x, y), statistic, vectorized=True,
                                n_resamples=np.inf, alternative=alternative,
-                               axis=1, random_state=self.rng)
+                               axis=1, rng=self.rng)
 
         assert_allclose(res.statistic, expected.statistic, rtol=self.rtol)
         assert_allclose(res.pvalue, expected.pvalue, rtol=self.rtol)
@@ -1602,7 +1627,7 @@ class TestPermutationTest:
 
         # cramervonmises_2samp has only one alternative, greater
         res = permutation_test((x, y), statistic1d, n_resamples=np.inf,
-                               alternative='greater', random_state=self.rng)
+                               alternative='greater', rng=self.rng)
 
         assert_allclose(res.statistic, expected.statistic, rtol=self.rtol)
         assert_allclose(res.pvalue, expected.pvalue, rtol=self.rtol)
@@ -1643,7 +1668,7 @@ class TestPermutationTest:
 
         # Calculate exact and randomized permutation results
         kwds = {'vectorized': False, 'axis': axis, 'alternative': 'greater',
-                'permutation_type': 'independent', 'random_state': self.rng}
+                'permutation_type': 'independent', 'rng': self.rng}
         res = permutation_test(data, statistic1d, n_resamples=np.inf, **kwds)
         res2 = permutation_test(data, statistic1d, n_resamples=1000, **kwds)
 
@@ -1655,6 +1680,7 @@ class TestPermutationTest:
 
     # -- Paired-Sample Tests -- #
 
+    @pytest.mark.slow
     @pytest.mark.parametrize('alternative', ("less", "greater", "two-sided"))
     def test_against_wilcoxon(self, alternative):
 
@@ -1680,7 +1706,7 @@ class TestPermutationTest:
         expected_p = expected[1]
 
         kwds = {'vectorized': False, 'axis': 1, 'alternative': alternative,
-                'permutation_type': 'samples', 'random_state': self.rng,
+                'permutation_type': 'samples', 'rng': self.rng,
                 'n_resamples': np.inf}
         res1 = permutation_test((x-y,), statistic_1samp_1d, **kwds)
         res2 = permutation_test((x, y), statistic_2samp_1d, **kwds)
@@ -1710,7 +1736,7 @@ class TestPermutationTest:
 
         res = stats.permutation_test((x,), statistic, vectorized=True,
                                      permutation_type='samples',
-                                     n_resamples=np.inf, random_state=self.rng,
+                                     n_resamples=np.inf, rng=self.rng,
                                      alternative=alternative)
         assert_allclose(res.pvalue, expected.pvalue, rtol=self.rtol)
 
@@ -1728,7 +1754,7 @@ class TestPermutationTest:
 
         # kendalltau currently has only one alternative, two-sided
         res = permutation_test((x,), statistic1d, permutation_type='pairings',
-                               n_resamples=np.inf, random_state=self.rng)
+                               n_resamples=np.inf, rng=self.rng)
 
         assert_allclose(res.statistic, expected.statistic, rtol=self.rtol)
         assert_allclose(res.pvalue, expected.pvalue, rtol=self.rtol)
@@ -1747,7 +1773,7 @@ class TestPermutationTest:
 
         res = permutation_test((x,), statistic, permutation_type='pairings',
                                n_resamples=np.inf, alternative=alternative,
-                               random_state=rng)
+                               rng=rng)
         res2 = stats.fisher_exact(tab, alternative=alternative)
 
         assert_allclose(res.pvalue, res2[1])
@@ -1786,7 +1812,7 @@ class TestPermutationTest:
 
         # Let's forgive this use of an integer seed, please.
         kwds = {'vectorized': False, 'axis': axis, 'alternative': 'greater',
-                'permutation_type': 'pairings', 'random_state': 0}
+                'permutation_type': 'pairings', 'rng': 0}
         res = permutation_test(data, statistic1d, n_resamples=np.inf, **kwds)
         res2 = permutation_test(data, statistic1d, n_resamples=5000, **kwds)
 
@@ -1923,6 +1949,7 @@ class TestPermutationTest:
         got = list(_resampling._batch_generator(iterable, batch))
         assert got == expected
 
+    @pytest.mark.fail_slow(2)
     def test_finite_precision_statistic(self):
         # Some statistics return numerically distinct values when the values
         # should be equal in theory. Test that `permutation_test` accounts
@@ -1979,9 +2006,9 @@ def test_parameter_vectorized(fun_name):
     def rvs(size):  # needed by `monte_carlo_test`
         return stats.norm.rvs(size=size, random_state=rng)
 
-    fun_options = {'bootstrap': {'data': (sample,), 'random_state': rng,
+    fun_options = {'bootstrap': {'data': (sample,), 'rng': rng,
                                  'method': 'percentile'},
-                   'permutation_test': {'data': (sample,), 'random_state': rng,
+                   'permutation_test': {'data': (sample,), 'rng': rng,
                                         'permutation_type': 'samples'},
                    'monte_carlo_test': {'sample': sample, 'rvs': rvs}}
     common_options = {'n_resamples': 100}
