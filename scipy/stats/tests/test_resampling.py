@@ -3,9 +3,8 @@ import pytest
 import numpy as np
 from numpy.testing import assert_allclose, assert_equal, suppress_warnings
 
-from scipy.conftest import array_api_compatible
 from scipy._lib._util import rng_integers
-from scipy._lib._array_api import array_namespace, is_numpy
+from scipy._lib._array_api import is_numpy
 from scipy._lib._array_api_no_0d import xp_assert_close, xp_assert_equal
 from scipy import stats, special
 from scipy.optimize import root
@@ -773,7 +772,6 @@ class TestMonteCarloHypothesisTest:
             # return stats.ttest_1samp(x, popmean=0., axis=axis).statistic)
         return statistic
 
-    @array_api_compatible
     def test_input_validation(self, xp):
         # test that the appropriate error messages are raised for invalid input
 
@@ -840,7 +838,6 @@ class TestMonteCarloHypothesisTest:
         except ValueError as e:
             assert str(e).startswith(message)
 
-    @array_api_compatible
     def test_input_validation_xp(self, xp):
         def non_vectorized_statistic(x):
             return xp.mean(x)
@@ -857,19 +854,17 @@ class TestMonteCarloHypothesisTest:
             monte_carlo_test(sample, stats.norm.rvs, xp.mean, vectorized=False)
 
     @pytest.mark.xslow
-    @array_api_compatible
     def test_batch(self, xp):
         # make sure that the `batch` parameter is respected by checking the
         # maximum batch size provided in calls to `statistic`
         rng = np.random.default_rng(23492340193)
         x = xp.asarray(rng.standard_normal(size=10))
 
-        xp_test = array_namespace(x)  # numpy.std doesn't have `correction`
         def statistic(x, axis):
             batch_size = 1 if x.ndim == 1 else x.shape[0]
             statistic.batch_size = max(batch_size, statistic.batch_size)
             statistic.counter += 1
-            return self.get_statistic(xp_test)(x, axis=axis)
+            return self.get_statistic(xp)(x, axis=axis)
         statistic.counter = 0
         statistic.batch_size = 0
 
@@ -896,7 +891,6 @@ class TestMonteCarloHypothesisTest:
         xp_assert_equal(res1.pvalue, res3.pvalue)
         xp_assert_equal(res2.pvalue, res3.pvalue)
 
-    @array_api_compatible
     @pytest.mark.parametrize('axis', range(-3, 3))
     def test_axis_dtype(self, axis, xp):
         # test that Nd-array samples are handled correctly for valid values
@@ -919,8 +913,7 @@ class TestMonteCarloHypothesisTest:
         expected = stats.ttest_1samp(x, popmean=0., axis=axis)
 
         x = xp.asarray(x, dtype=dtype)
-        xp_test = array_namespace(x)  # numpy.std doesn't have `correction`
-        statistic = self.get_statistic(xp_test)
+        statistic = self.get_statistic(xp)
         rvs = self.get_rvs(stats.norm.rvs, rng, dtype=dtype, xp=xp)
 
         res = monte_carlo_test(x, rvs, statistic, vectorized=True,
@@ -931,7 +924,6 @@ class TestMonteCarloHypothesisTest:
         xp_assert_close(res.statistic, ref_statistic)
         xp_assert_close(res.pvalue, ref_pvalue, atol=self.atol)
 
-    @array_api_compatible
     @pytest.mark.parametrize('alternative', ("two-sided", "less", "greater"))
     def test_alternative(self, alternative, xp):
         # test that `alternative` is working as expected
@@ -941,8 +933,7 @@ class TestMonteCarloHypothesisTest:
         ref = stats.ttest_1samp(x, 0., alternative=alternative)
 
         x = xp.asarray(x)
-        xp_test = array_namespace(x)  # numpy.std doesn't have `correction`
-        statistic = self.get_statistic(xp_test)
+        statistic = self.get_statistic(xp)
         rvs = self.get_rvs(stats.norm.rvs, rng, xp=xp)
 
         res = monte_carlo_test(x, rvs, statistic, alternative=alternative)
@@ -1096,7 +1087,7 @@ class TestMonteCarloHypothesisTest:
         data = rng.random(size=(2, 5)), rng.random(size=7)  # broadcastable
         rvs = rng.normal, rng.normal
         def statistic(x, y, axis):
-            return stats.ttest_ind(x, y, axis).statistic
+            return stats.ttest_ind(x, y, axis=axis).statistic
 
         res = stats.monte_carlo_test(data, rvs, statistic, axis=-1)
         ref = stats.ttest_ind(data[0], [data[1]], axis=-1)
@@ -1522,35 +1513,6 @@ class TestPermutationTest:
 
         assert res.statistic == res2.statistic
         assert_allclose(res.pvalue, res2.pvalue, atol=1e-2)
-
-    @pytest.mark.parametrize('alternative', ('less', 'greater'))
-    # Different conventions for two-sided p-value here VS ttest_ind.
-    # Eventually, we can add multiple options for the two-sided alternative
-    # here in permutation_test.
-    @pytest.mark.parametrize('permutations', (30, 1e9))
-    @pytest.mark.parametrize('axis', (0, 1, 2))
-    def test_against_permutation_ttest(self, alternative, permutations, axis):
-        # check that this function and ttest_ind with permutations give
-        # essentially identical results.
-
-        x = np.arange(3*4*5).reshape(3, 4, 5)
-        y = np.moveaxis(np.arange(4)[:, None, None], 0, axis)
-
-        rng1 = np.random.default_rng(4337234444626115331)
-        res1 = stats.ttest_ind(x, y, permutations=permutations, axis=axis,
-                               random_state=rng1, alternative=alternative)
-
-        def statistic(x, y, axis):
-            return stats.ttest_ind(x, y, axis=axis).statistic
-
-        rng2 = np.random.default_rng(4337234444626115331)
-        res2 = permutation_test((x, y), statistic, vectorized=True,
-                                n_resamples=permutations,
-                                alternative=alternative, axis=axis,
-                                rng=rng2)
-
-        assert_allclose(res1.statistic, res2.statistic, rtol=self.rtol)
-        assert_allclose(res1.pvalue, res2.pvalue, rtol=self.rtol)
 
     # -- Independent (Unpaired) Sample Tests -- #
 
@@ -2028,3 +1990,11 @@ def test_parameter_vectorized(fun_name):
         return np.mean(x)
     fun(statistic=statistic, vectorized=None, **options)
     fun(statistic=statistic, vectorized=False, **options)
+
+
+class TestMonteCarloMethod:
+    def test_rvs_and_random_state(self):
+        message = "Use of `rvs` and `rng` are mutually exclusive."
+        rng = np.random.default_rng(34982345)
+        with pytest.raises(ValueError, match=message):
+            stats.MonteCarloMethod(rvs=rng.random, rng=rng)

@@ -6,13 +6,13 @@ https://data-apis.org/array-api/latest/purpose_and_scope.html
 The SciPy use case of the Array API is described on the following page:
 https://data-apis.org/array-api/latest/use_cases.html#use-case-scipy
 """
-from __future__ import annotations
-
 import os
-import warnings
 
+from collections.abc import Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from types import ModuleType
-from typing import Any, Literal, TYPE_CHECKING
+from typing import Any, Literal, TypeAlias
 
 import numpy as np
 import numpy.typing as npt
@@ -22,19 +22,24 @@ from scipy._lib.array_api_compat import (
     is_array_api_obj,
     size as xp_size,
     numpy as np_compat,
-    device as xp_device
+    device as xp_device,
+    is_numpy_namespace as is_numpy,
+    is_cupy_namespace as is_cupy,
+    is_torch_namespace as is_torch,
+    is_jax_namespace as is_jax,
+    is_array_api_strict_namespace as is_array_api_strict
 )
+from scipy._lib._sparse import issparse
 
 __all__ = [
     '_asarray', 'array_namespace', 'assert_almost_equal', 'assert_array_almost_equal',
-    'get_xp_devices',
+    'get_xp_devices', 'default_xp',
     'is_array_api_strict', 'is_complex', 'is_cupy', 'is_jax', 'is_numpy', 'is_torch', 
     'SCIPY_ARRAY_API', 'SCIPY_DEVICE', 'scipy_namespace_for',
     'xp_assert_close', 'xp_assert_equal', 'xp_assert_less',
-    'xp_atleast_nd', 'xp_copy', 'xp_copysign', 'xp_device',
+    'xp_copy', 'xp_copysign', 'xp_device',
     'xp_moveaxis_to_end', 'xp_ravel', 'xp_real', 'xp_sign', 'xp_size',
     'xp_take_along_axis', 'xp_unsupported_param_msg', 'xp_vector_norm',
-    'xp_create_diagonal'
 ]
 
 
@@ -49,12 +54,11 @@ _GLOBAL_CONFIG = {
 }
 
 
-if TYPE_CHECKING:
-    Array = Any  # To be changed to a Protocol later (see array-api#589)
-    ArrayLike = Array | npt.ArrayLike
+Array: TypeAlias = Any  # To be changed to a Protocol later (see array-api#589)
+ArrayLike: TypeAlias = Array | npt.ArrayLike
 
 
-def _compliance_scipy(arrays: list[ArrayLike]) -> list[Array]:
+def _compliance_scipy(arrays):
     """Raise exceptions on known-bad subclasses.
 
     The following subclasses are not supported and raise and error:
@@ -67,7 +71,6 @@ def _compliance_scipy(arrays: list[ArrayLike]) -> list[Array]:
     for i in range(len(arrays)):
         array = arrays[i]
 
-        from scipy.sparse import issparse
         # this comes from `_util._asarray_validated`
         if issparse(array):
             msg = ('Sparse arrays/matrices are not supported by this function. '
@@ -103,11 +106,8 @@ def _compliance_scipy(arrays: list[ArrayLike]) -> list[Array]:
 
 def _check_finite(array: Array, xp: ModuleType) -> None:
     """Check for NaNs or Infs."""
-    msg = "array must not contain infs or NaNs"
-    try:
-        if not xp.all(xp.isfinite(array)):
-            raise ValueError(msg)
-    except TypeError:
+    if not xp.all(xp.isfinite(array)):
+        msg = "array must not contain infs or NaNs"
         raise ValueError(msg)
 
 
@@ -195,17 +195,6 @@ def _asarray(
     return array
 
 
-def xp_atleast_nd(x: Array, *, ndim: int, xp: ModuleType | None = None) -> Array:
-    """Recursively expand the dimension to have at least `ndim`."""
-    if xp is None:
-        xp = array_namespace(x)
-    x = xp.asarray(x)
-    if x.ndim < ndim:
-        x = xp.expand_dims(x, axis=0)
-        x = xp_atleast_nd(x, ndim=ndim, xp=xp)
-    return x
-
-
 def xp_copy(x: Array, *, xp: ModuleType | None = None) -> Array:
     """
     Copies an array.
@@ -234,32 +223,38 @@ def xp_copy(x: Array, *, xp: ModuleType | None = None) -> Array:
     return _asarray(x, copy=True, xp=xp)
 
 
-def is_numpy(xp: ModuleType) -> bool:
-    return xp.__name__ in ('numpy', 'scipy._lib.array_api_compat.numpy')
+_default_xp_ctxvar: ContextVar[ModuleType] = ContextVar("_default_xp")
 
+@contextmanager
+def default_xp(xp: ModuleType) -> Generator[None, None, None]:
+    """In all ``xp_assert_*`` and ``assert_*`` function calls executed within this
+    context manager, test by default that the array namespace is 
+    the provided across all arrays, unless one explicitly passes the ``xp=``
+    parameter or ``check_namespace=False``.
 
-def is_cupy(xp: ModuleType) -> bool:
-    return xp.__name__ in ('cupy', 'scipy._lib.array_api_compat.cupy')
-
-
-def is_torch(xp: ModuleType) -> bool:
-    return xp.__name__ in ('torch', 'scipy._lib.array_api_compat.torch')
-
-
-def is_jax(xp):
-    return xp.__name__ in ('jax.numpy', 'jax.experimental.array_api')
-
-
-def is_array_api_strict(xp):
-    return xp.__name__ == 'array_api_strict'
+    Without this context manager, the default value for `xp` is the namespace
+    for the desired array (the second parameter of the tests).
+    """
+    token = _default_xp_ctxvar.set(xp)
+    try:
+        yield
+    finally:
+        _default_xp_ctxvar.reset(token)
 
 
 def _strict_check(actual, desired, xp, *,
                   check_namespace=True, check_dtype=True, check_shape=True,
                   check_0d=True):
     __tracebackhide__ = True  # Hide traceback for py.test
+
+    if xp is None:
+        try:
+            xp = _default_xp_ctxvar.get()
+        except LookupError:
+            xp = array_namespace(desired)
+ 
     if check_namespace:
-        _assert_matching_namespace(actual, desired)
+        _assert_matching_namespace(actual, desired, xp)
 
     # only NumPy distinguishes between scalars and arrays; we do if check_0d=True.
     # do this first so we can then cast to array (and thus use the array API) below.
@@ -281,28 +276,32 @@ def _strict_check(actual, desired, xp, *,
         assert actual.shape == desired.shape, _msg
 
     desired = xp.broadcast_to(desired, actual.shape)
-    return actual, desired
+    return actual, desired, xp
 
 
-def _assert_matching_namespace(actual, desired):
+def _assert_matching_namespace(actual, desired, xp):
     __tracebackhide__ = True  # Hide traceback for py.test
-    actual = actual if isinstance(actual, tuple) else (actual,)
-    desired_space = array_namespace(desired)
-    for arr in actual:
-        arr_space = array_namespace(arr)
-        _msg = (f"Namespaces do not match.\n"
-                f"Actual: {arr_space.__name__}\n"
-                f"Desired: {desired_space.__name__}")
-        assert arr_space == desired_space, _msg
+
+    desired_arr_space = array_namespace(desired)
+    _msg = ("Namespace of desired array does not match expectations "
+            "set by the `default_xp` context manager or by the `xp`"
+            "pytest fixture.\n"
+            f"Desired array's space: {desired_arr_space.__name__}\n"
+            f"Expected namespace: {xp.__name__}")
+    assert desired_arr_space == xp, _msg
+
+    actual_arr_space = array_namespace(actual)
+    _msg = ("Namespace of actual and desired arrays do not match.\n"
+            f"Actual: {actual_arr_space.__name__}\n"
+            f"Desired: {xp.__name__}")
+    assert actual_arr_space == xp, _msg
 
 
 def xp_assert_equal(actual, desired, *, check_namespace=True, check_dtype=True,
                     check_shape=True, check_0d=True, err_msg='', xp=None):
     __tracebackhide__ = True  # Hide traceback for py.test
-    if xp is None:
-        xp = array_namespace(actual)
 
-    actual, desired = _strict_check(
+    actual, desired, xp = _strict_check(
         actual, desired, xp, check_namespace=check_namespace,
         check_dtype=check_dtype, check_shape=check_shape,
         check_0d=check_0d
@@ -324,10 +323,8 @@ def xp_assert_close(actual, desired, *, rtol=None, atol=0, check_namespace=True,
                     check_dtype=True, check_shape=True, check_0d=True,
                     err_msg='', xp=None):
     __tracebackhide__ = True  # Hide traceback for py.test
-    if xp is None:
-        xp = array_namespace(actual)
 
-    actual, desired = _strict_check(
+    actual, desired, xp = _strict_check(
         actual, desired, xp,
         check_namespace=check_namespace, check_dtype=check_dtype,
         check_shape=check_shape, check_0d=check_0d
@@ -357,10 +354,8 @@ def xp_assert_close(actual, desired, *, rtol=None, atol=0, check_namespace=True,
 def xp_assert_less(actual, desired, *, check_namespace=True, check_dtype=True,
                    check_shape=True, check_0d=True, err_msg='', verbose=True, xp=None):
     __tracebackhide__ = True  # Hide traceback for py.test
-    if xp is None:
-        xp = array_namespace(actual)
 
-    actual, desired = _strict_check(
+    actual, desired, xp = _strict_check(
         actual, desired, xp, check_namespace=check_namespace,
         check_dtype=check_dtype, check_shape=check_shape,
         check_0d=check_0d
@@ -395,34 +390,6 @@ def assert_almost_equal(actual, desired, decimal=7, *args, **kwds):
     return xp_assert_close(actual, desired,
                            atol=atol, rtol=rtol, check_dtype=False, check_shape=False,
                            *args, **kwds)
-
-
-def xp_cov(x: Array, *, xp: ModuleType | None = None) -> Array:
-    if xp is None:
-        xp = array_namespace(x)
-
-    X = xp_copy(x, xp=xp)
-    dtype = xp.result_type(X, xp.float64)
-
-    X = xp_atleast_nd(X, ndim=2, xp=xp)
-    X = xp.asarray(X, dtype=dtype)
-
-    avg = xp.mean(X, axis=1)
-    fact = X.shape[1] - 1
-
-    if fact <= 0:
-        warnings.warn("Degrees of freedom <= 0 for slice",
-                      RuntimeWarning, stacklevel=2)
-        fact = 0.0
-
-    X -= avg[:, None]
-    X_T = X.T
-    if xp.isdtype(X_T.dtype, 'complex floating'):
-        X_T = xp.conj(X_T)
-    c = X @ X_T
-    c /= fact
-    axes = tuple(axis for axis, length in enumerate(c.shape) if length == 1)
-    return xp.squeeze(c, axis=axes)
 
 
 def xp_unsupported_param_msg(param: Any) -> str:
@@ -588,7 +555,7 @@ def xp_take_along_axis(arr: Array,
 def xp_broadcast_promote(*args, ensure_writeable=False, force_floating=False, xp=None):
     xp = array_namespace(*args) if xp is None else xp
 
-    args = [(xp.asarray(arg) if arg is not None else arg) for arg in args]
+    args = [(_asarray(arg, subok=True) if arg is not None else arg) for arg in args]
     args_not_none = [arg for arg in args if arg is not None]
 
     # determine minimum dtype
@@ -612,7 +579,12 @@ def xp_broadcast_promote(*args, ensure_writeable=False, force_floating=False, xp
 
     # determine result shape
     shapes = {arg.shape for arg in args_not_none}
-    shape = np.broadcast_shapes(*shapes) if len(shapes) != 1 else args_not_none[0].shape
+    try:
+        shape = (np.broadcast_shapes(*shapes) if len(shapes) != 1
+                 else args_not_none[0].shape)
+    except ValueError as e:
+        message = "Array shapes are incompatible for broadcasting."
+        raise ValueError(message) from e
 
     out = []
     for arg in args:
@@ -624,7 +596,8 @@ def xp_broadcast_promote(*args, ensure_writeable=False, force_floating=False, xp
         # Even if two arguments need broadcasting, this is faster than
         # `broadcast_arrays`, especially since we've already determined `shape`
         if arg.shape != shape:
-            arg = xp.broadcast_to(arg, shape)
+            kwargs = {'subok': True} if is_numpy(xp) else {}
+            arg = xp.broadcast_to(arg, shape, **kwargs)
 
         # convert dtype/copy only if needed
         if (arg.dtype != dtype) or ensure_writeable:
@@ -647,11 +620,13 @@ def xp_float_to_complex(arr: Array, xp: ModuleType | None = None) -> Array:
 
     return arr
 
-def xp_create_diagonal(x: Array, /, *, offset: int = 0,
-                       xp: ModuleType | None = None) -> Array:
-    xp = array_namespace(x) if xp is None else xp
-    n = x.shape[0] + abs(offset)
-    diag = xp.zeros(n**2, dtype=x.dtype)
-    i = offset if offset >= 0 else abs(offset) * n
-    diag[i:min(n*(n-offset), diag.shape[0]):n+1] = x
-    return xp.reshape(diag, (n, n))
+
+def xp_default_dtype(xp):
+    """Query the namespace-dependent default floating-point dtype.
+    """
+    if is_torch(xp):
+        # historically, we allow pytorch to keep its default of float32
+        return xp.get_default_dtype()
+    else:
+        # we default to float64
+        return xp.float64
